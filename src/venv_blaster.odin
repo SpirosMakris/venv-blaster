@@ -7,7 +7,7 @@ package venv_blaster
 // - [x] Improve walking
 // - [] Improve output
 // - [] Simplify mem handling
-// - [] Simplify size calculation
+// - [x] Simplify size calculation
 // - [] Make clipboard pasting more secure
 
 import "core:flags"
@@ -109,7 +109,7 @@ main :: proc() {
 		cfg_path := filepath.join({info.fullpath, "pyvenv.cfg"}, alloc)
 
 		if os.exists(cfg_path) {
-			size := calculate_dir_size(info.fullpath, &arena)
+			size := calculate_dir_size(info.fullpath)
 			append(
 				&found_venvs,
 				Venv_Info{path = strings.clone(info.fullpath, alloc), size = size},
@@ -202,45 +202,20 @@ main :: proc() {
 	vmem.arena_free_all(&arena)
 }
 
-calculate_dir_size :: proc(path: string, arena: ^vmem.Arena) -> i64 {
-	temp := vmem.arena_temp_begin(arena)
-
-	alloc := vmem.arena_allocator(arena)
+calculate_dir_size :: proc(path: string) -> i64 {
 	size: i64
 
-	f, err := os.open(path)
-	if err != nil {
-		log.errorf("Failed to calculate size for dir: `%s` with error: %s", err)
-		return 0
-	}
-	defer os.close(f)
+	w := os.walker_create(path)
+	defer os.walker_destroy(&w)
 
-	infos, _ := os.read_dir(f, -1, alloc)
-	for info in infos {
-
-		#partial switch info.type {
-		case .Directory:
-			{
-				size += calculate_dir_size(info.fullpath, arena)
-
-			}
-
-		case .Regular:
-			{
-				size += info.size
-			}
-
-		case:
-			{}
-
+	for info in os.walker_walk(&w) {
+		// @TODO(spiros): Handle errors in walker
+		if info.type == .Regular {
+			size += info.size
 		}
 	}
-
-	vmem.arena_temp_end(temp)
-
 	return size
 }
-
 
 copy_to_clipboard_linux :: proc(contents: string, allocator := context.allocator) {
 	// Using xclip. Pipe the content into xclip -selection clipboard
