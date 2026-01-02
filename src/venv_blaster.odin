@@ -6,7 +6,7 @@ package venv_blaster
 // - [x] Scan hidden flag
 // - [x] Improve walking
 // - [x] Improve output
-// - [] Simplify mem handling
+// - [x] Simplify mem handling
 // - [x] Simplify size calculation
 // - [] Make clipboard pasting more secure
 
@@ -48,12 +48,30 @@ CLR_GREY :: "\x1b[90m"
 
 
 main :: proc() {
+	// Setup arena allocator
+	arena: vmem.Arena
+	if err := vmem.arena_init_growing(&arena); err != nil {
+		fmt.eprintfln("Failed to initialize arena: %v", err)
+		os.exit(1)
+	}
+
+	defer {
+		fmt.println("Freeing and destroying arena.")
+		vmem.arena_free_all(&arena)
+		vmem.arena_destroy(&arena)
+	}
+	alloc := vmem.arena_allocator(&arena)
+
+	// Set our main allocator to our arena
+	context.allocator = alloc
+
 	//  Track memory (for file_allocator in walker?)
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
 		defer {
+			fmt.println("Checking allocations.")
 			log.errorf("%d leaked allocations", len(track.allocation_map))
 			i: int
 			for _, entry in track.allocation_map {
@@ -66,16 +84,6 @@ main :: proc() {
 		}
 	}
 
-	// Setup arena allocator
-	arena: vmem.Arena
-	if err := vmem.arena_init_growing(&arena); err != nil {
-		fmt.eprintfln("Failed to initialize arena: %v", err)
-		os.exit(1)
-	}
-	defer vmem.arena_destroy(&arena)
-	alloc := vmem.arena_allocator(&arena)
-
-
 	// Flag parsing
 	opt: Options
 	opt.path = "." // Default path
@@ -84,11 +92,10 @@ main :: proc() {
 	// Setup logger (default shows errors only)
 	context.logger = log.create_console_logger(opt.verbose ? .Debug : .Error)
 
+	// Will use context.allocator (set to arena)
 	found_venvs: [dynamic]Venv_Info
-	found_venvs.allocator = alloc
 
 	ignored: [dynamic]Ignored_Info
-	ignored.allocator = alloc
 
 	// @TODO(spiros): Style output
 	fmt.printfln("%sScanning: %s %s %s", CLR_GREEN, CLR_CYAN, opt.path, CLR_RESET)
@@ -106,22 +113,19 @@ main :: proc() {
 			assert(err == os.Platform_Error.EACCES)
 
 			if opt.verbose && opt.errors do fmt.printfln("%sSkipping (Error): %s %s%s", CLR_RED, info.fullpath, err, CLR_RESET)
-
-			append(&ignored, Ignored_Info{info.fullpath, "Access denied"})
+			error_str := fmt.aprintf("%v", err)
+			append(&ignored, Ignored_Info{strings.clone(info.fullpath), strings.clone(error_str)})
 
 			os.walker_skip_dir(&w)
 			continue
 		}
 
 		// Identify by signature
-		cfg_path := filepath.join({info.fullpath, "pyvenv.cfg"}, alloc)
+		cfg_path := filepath.join({info.fullpath, "pyvenv.cfg"})
 
 		if os.exists(cfg_path) {
 			size := calculate_dir_size(info.fullpath)
-			append(
-				&found_venvs,
-				Venv_Info{path = strings.clone(info.fullpath, alloc), size = size},
-			)
+			append(&found_venvs, Venv_Info{path = strings.clone(info.fullpath), size = size})
 
 			if opt.verbose {
 
@@ -188,7 +192,7 @@ main :: proc() {
 
 	// Generate command
 	cmd_builder: strings.Builder
-	strings.builder_init(&cmd_builder, alloc)
+	strings.builder_init(&cmd_builder)
 	defer strings.builder_destroy(&cmd_builder)
 
 	// Add to command string
@@ -218,11 +222,8 @@ main :: proc() {
 			fmt.printf("Unckecked: %s because: %s\n", file.path, file.reason)
 		}
 	}
-	
+
 	fmt.printfln("Num ignored: %d", len(ignored))
-	
-	// Clean up
-	vmem.arena_free_all(&arena)
 }
 
 calculate_dir_size :: proc(path: string) -> i64 {
@@ -240,14 +241,16 @@ calculate_dir_size :: proc(path: string) -> i64 {
 	return size
 }
 
-copy_to_clipboard_linux :: proc(contents: string, allocator := context.allocator) {
+copy_to_clipboard_linux :: proc(contents: string) {
 	// Using xclip. Pipe the content into xclip -selection clipboard
 
-	cmd := [3]string {
-		"sh",
-		"-c",
-		fmt.aprintf("echo -n '%s' | xclip -selection clipboard", contents, allocator = allocator),
-	}
+	cmd := make_slice([]string, 3)
+	defer delete_slice(cmd)
+
+	cmd[0] = "sh"
+	cmd[1] = "-c"
+	cmd[2] = fmt.aprintf("echo -n '%s' | xclip -selection clipboard", contents)
+
 	p_desc := os.Process_Desc {
 		command = cmd[:],
 	}
@@ -271,5 +274,5 @@ format_size :: proc(size: i64) -> string {
 		val /= 1024
 		i += 1
 	}
-	return fmt.tprintf("%.2f %s", val, units[i])
+	return fmt.aprintf("%.2f %s", val, units[i])
 }
