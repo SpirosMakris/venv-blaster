@@ -5,7 +5,7 @@ package venv_blaster
 // - [x] Verbose flag
 // - [x] Scan hidden flag
 // - [x] Improve walking
-// - [] Improve output
+// - [x] Improve output
 // - [] Simplify mem handling
 // - [x] Simplify size calculation
 // - [] Make clipboard pasting more secure
@@ -38,6 +38,14 @@ Ignored_Info :: struct {
 	path:   string,
 	reason: string,
 }
+
+// Terminal escape codes
+CLR_RESET :: "\x1b[0m"
+CLR_RED :: "\x1b[31m"
+CLR_GREEN :: "\x1b[32m"
+CLR_CYAN :: "\x1b[36m"
+CLR_GREY :: "\x1b[90m"
+
 
 main :: proc() {
 	//  Track memory (for file_allocator in walker?)
@@ -83,7 +91,7 @@ main :: proc() {
 	ignored.allocator = alloc
 
 	// @TODO(spiros): Style output
-	fmt.printfln("Scanning: `%s`", opt.path)
+	fmt.printfln("%sScanning: %s %s %s", CLR_GREEN, CLR_CYAN, opt.path, CLR_RESET)
 
 	// Main walk
 	w := os.walker_create(opt.path)
@@ -97,7 +105,7 @@ main :: proc() {
 		if _, err := os.walker_error(&w); err != nil {
 			assert(err == os.Platform_Error.EACCES)
 
-			if opt.verbose && opt.errors do fmt.printfln("Skipping (Error): %s %s", info.fullpath, err)
+			if opt.verbose && opt.errors do fmt.printfln("%sSkipping (Error): %s %s%s", CLR_RED, info.fullpath, err, CLR_RESET)
 
 			append(&ignored, Ignored_Info{info.fullpath, "Access denied"})
 
@@ -117,7 +125,14 @@ main :: proc() {
 
 			if opt.verbose {
 
-				fmt.printfln("[FOUND] %s (%d) `%s` with size: %.2f Mb", info.fullpath, size)
+				fmt.printfln(
+					"%s[FOUND]%s %s %s with size: %s Mb",
+					CLR_GREEN,
+					CLR_CYAN,
+					info.fullpath,
+					CLR_RESET,
+					format_size(size),
+				)
 			}
 
 			// Since this is a venv, don't look for other venvs inside it
@@ -132,12 +147,11 @@ main :: proc() {
 
 		if is_hidden && !opt.scan_hidden {
 			// We skip if not explicitly asked to scan hidden folders
-			if opt.verbose do fmt.printfln("Skipping hidden: %s", info.fullpath)
+			if opt.verbose do fmt.printfln("%sSkipping hidden: %s%s", CLR_GREY, info.fullpath, CLR_RESET)
 
 			os.walker_skip_dir(&w)
 			continue
 		}
-
 	}
 
 	if len(found_venvs) == 0 {
@@ -152,53 +166,62 @@ main :: proc() {
 		return a.size > b.size
 	})
 
-	total_size: i64 = 0
-	sb: strings.Builder
-	strings.builder_init(&sb, alloc)
-	defer strings.builder_destroy(&sb)
+	fmt.printfln("\n%-4s | %-12s | %s", "ID", "Size", "Path")
+	fmt.println("-----|--------------|---------------------------------------------")
 
-	strings.write_string(&sb, "rm -rf \\\n")
-
-	fmt.println("\nFound virtual envs:", len(found_venvs))
-	fmt.println("--------------------------------------------------")
-
+	total_size: i64
 	for venv, i in found_venvs {
-		mb := f64(venv.size) / mem.Megabyte
-		fmt.printf("[%.2f MB] %s\n", mb, venv.path)
 		total_size += venv.size
+		fmt.printf(
+			"%s% -4d | %-12s | %s%s\n",
+			CLR_CYAN,
+			i + 1,
+			format_size(venv.size),
+			venv.path,
+			CLR_RESET,
+		)
+	}
 
-		// Add to command string
-		strings.write_string(&sb, "\t\"")
-		strings.write_string(&sb, venv.path)
-		strings.write_string(&sb, "\" ")
+	fmt.println("-----|--------------|---------------------------------------------")
+
+	fmt.printf("Total potential savings: %s%s%s", CLR_GREEN, format_size(total_size), CLR_RESET)
+
+	// Generate command
+	cmd_builder: strings.Builder
+	strings.builder_init(&cmd_builder, alloc)
+	defer strings.builder_destroy(&cmd_builder)
+
+	// Add to command string
+	strings.write_string(&cmd_builder, "rm -rf \\\n")
+	for v, i in found_venvs {
+		strings.write_string(&cmd_builder, "\t\"")
+		strings.write_string(&cmd_builder, v.path)
+		strings.write_string(&cmd_builder, "\" ")
 		if (i < (len(found_venvs) - 1)) {
-			strings.write_string(&sb, "\\\n")
+			strings.write_string(&cmd_builder, "\\\n")
 		} else {
-			strings.write_string(&sb, "\n")
+			strings.write_string(&cmd_builder, "\n")
 		}
 	}
 
-	total_mb := f64(total_size) / mem.Megabyte
+	final_cmd := strings.to_string(cmd_builder)
 
+	fmt.println("\nCleanup command (copied to clipboard):")
+	fmt.printfln("%s%s%s\n", CLR_RED, final_cmd, CLR_RESET)
 
-	fmt.println("--------------------------------------------------")
-	fmt.printf("Total potential space savings: %.2f MB\n\n", total_mb)
-	fmt.printfln("Num ignored: %d", len(ignored))
+	copy_to_clipboard_linux(final_cmd)
 
-	// Generate command
-	command := strings.to_string(sb)
-	fmt.println("Command to clean:")
-	fmt.println(command)
-
+	// Ignored reporting
 	if opt.errors {
 		for file, i in ignored {
 			if i > 3 do break
 			fmt.printf("Unckecked: %s because: %s\n", file.path, file.reason)
 		}
 	}
-
-	copy_to_clipboard_linux(command)
-
+	
+	fmt.printfln("Num ignored: %d", len(ignored))
+	
+	// Clean up
 	vmem.arena_free_all(&arena)
 }
 
@@ -237,4 +260,16 @@ copy_to_clipboard_linux :: proc(contents: string, allocator := context.allocator
 		fmt.printfln("\n(Failed to copy to clipboard. Ensure 'xclip' is installed.)")
 	}
 
+}
+
+format_size :: proc(size: i64) -> string {
+	val := f64(size)
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+
+	i := 0
+	for val >= 1024 && i < len(units) - 1 {
+		val /= 1024
+		i += 1
+	}
+	return fmt.tprintf("%.2f %s", val, units[i])
 }
