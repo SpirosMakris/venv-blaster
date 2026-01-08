@@ -8,7 +8,7 @@ package venv_blaster
 // - [x] Improve output
 // - [x] Simplify mem handling
 // - [x] Simplify size calculation
-// - [] Make clipboard pasting more secure
+// - [x] Make clipboard pasting more secure
 
 import "core:flags"
 import "core:fmt"
@@ -56,7 +56,6 @@ main :: proc() {
 	}
 
 	defer {
-		fmt.println("Freeing and destroying arena.")
 		vmem.arena_free_all(&arena)
 		vmem.arena_destroy(&arena)
 	}
@@ -279,7 +278,6 @@ copy_to_clipboard_linux :: proc(contents: string, allocator := context.allocator
 		escaped_str,
 		allocator = allocator,
 	)
-	fmt.println(cmd)
 	defer delete(cmd, allocator)
 
 	sh_cmd := [3]string{"sh", "-c", cmd}
