@@ -89,6 +89,16 @@ main :: proc() {
 	opt.path = "." // Default path
 	flags.parse_or_exit(&opt, os.args, .Odin)
 
+	path_info, path_err := os.stat(opt.path, alloc)
+	if path_err != nil {
+		fmt.eprintfln("Error: Path '%s' does not exist or is not accessible.", opt.path)
+		os.exit(1)
+	}
+	if path_info.type != .Directory {
+		fmt.eprintfln("Error: '%s' is not a directory.", opt.path)
+		os.exit(1)
+	}
+
 	// Setup logger (default shows errors only)
 	context.logger = log.create_console_logger(opt.verbose ? .Debug : .Error)
 
@@ -198,8 +208,9 @@ main :: proc() {
 	// Add to command string
 	strings.write_string(&cmd_builder, "rm -rf \\\n")
 	for v, i in found_venvs {
+		escaped := escape_path(v.path, alloc)
 		strings.write_string(&cmd_builder, "\t\"")
-		strings.write_string(&cmd_builder, v.path)
+		strings.write_string(&cmd_builder, escaped)
 		strings.write_string(&cmd_builder, "\" ")
 		if (i < (len(found_venvs) - 1)) {
 			strings.write_string(&cmd_builder, "\\\n")
@@ -219,7 +230,7 @@ main :: proc() {
 	if opt.errors {
 		for file, i in ignored {
 			if i > 3 do break
-			fmt.printf("Unckecked: %s because: %s\n", file.path, file.reason)
+			fmt.printf("Unchecked: %s because: %s\n", file.path, file.reason)
 		}
 	}
 
@@ -240,19 +251,41 @@ calculate_dir_size :: proc(path: string) -> i64 {
 	}
 	return size
 }
+	escape_path :: proc(path: string, allocator := context.allocator) -> string {
+		result: strings.Builder
+		strings.builder_init(&result, allocator)
+		for c in path {
+			if c == '\'' {
+				strings.write_byte(&result, '\\')
+			}
+			strings.write_byte(&result, u8(c))
+		}
+		return strings.to_string(result)
+	}
 
-copy_to_clipboard_linux :: proc(contents: string) {
-	// Using xclip. Pipe the content into xclip -selection clipboard
+copy_to_clipboard_linux :: proc(contents: string, allocator := context.allocator) {
+	escaped_contents: strings.Builder
+	strings.builder_init(&escaped_contents, allocator)
+	for c in contents {
+		if c == '$' || c == '`' || c == '"' || c == '\\' {
+			strings.write_byte(&escaped_contents, '\\')
+		}
+		strings.write_byte(&escaped_contents, u8(c))
+	}
+	escaped_str := strings.to_string(escaped_contents)
 
-	cmd := make_slice([]string, 3)
-	defer delete_slice(cmd)
+	cmd := fmt.aprintf(
+		"printf '%%s' \"%s\" | xclip -selection clipboard",
+		escaped_str,
+		allocator = allocator,
+	)
+	fmt.println(cmd)
+	defer delete(cmd, allocator)
 
-	cmd[0] = "sh"
-	cmd[1] = "-c"
-	cmd[2] = fmt.aprintf("echo -n '%s' | xclip -selection clipboard", contents)
+	sh_cmd := [3]string{"sh", "-c", cmd}
 
 	p_desc := os.Process_Desc {
-		command = cmd[:],
+		command = sh_cmd[:],
 	}
 
 	process, err := os.process_start(p_desc)
@@ -262,7 +295,6 @@ copy_to_clipboard_linux :: proc(contents: string) {
 	} else {
 		fmt.printfln("\n(Failed to copy to clipboard. Ensure 'xclip' is installed.)")
 	}
-
 }
 
 format_size :: proc(size: i64) -> string {
